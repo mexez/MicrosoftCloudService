@@ -1,0 +1,409 @@
+
+###CSV-Driven Bulk SharePoint Site Provisioning from Template
+
+# Step 1: Connect to the source site and export a clean template (excluding Lists and Pages)
+Connect-PnPOnline -Url "https://m365b701561.sharepoint.com/sites/ProjectSite001i" `
+     -ClientId "f626ab55-a937-4e11-b780-891998651f30" `
+     -Tenant "m365b701561.onmicrosoft.com" `
+     -CertificatePath "$env:USERPROFILE\Documents\PnPPowerShellAppCert.pfx" `
+     -CertificatePassword (ConvertTo-SecureString -String "MyStrongPassword123!" -AsPlainText -Force)
+
+Get-PnPSiteTemplate -Out "$env:USERPROFILE\Documents\CleanTemplate.xml" -ExcludeHandlers Lists, Pages
+
+
+# Step 2: Connect to the SharePoint admin center
+Connect-PnPOnline -Url "https://m365b701561-admin.sharepoint.com" `
+    -ClientId "f626ab55-a937-4e11-b780-891998651f30" `
+    -Tenant "m365b701561.onmicrosoft.com" `
+    -CertificatePath "$env:USERPROFILE\Documents\PnPPowerShellAppCert.pfx" `
+    -CertificatePassword (ConvertTo-SecureString -String "MyStrongPassword123!" -AsPlainText -Force)
+
+# Step 3: Import site list from CSV
+$sites = Import-Csv "C:\Users\sut\Downloads\sharepoint_site_folders.csv"
+
+foreach ($site in $sites) {
+    Write-Host "Processing site: $($site.Title) with alias: $($site.Alias)"
+
+    $siteUrl = "https://m365b701561.sharepoint.com/sites/$($site.Alias)"
+
+    # Create the new site
+    New-PnPSite -Type TeamSite -Title $site.Title -Alias $site.Alias
+
+    Write-Host "Created site: $siteUrl"
+
+    # Connect to the new site
+    Connect-PnPOnline -Url $siteUrl `
+        -ClientId "f626ab55-a937-4e11-b780-891998651f30" `
+        -Tenant "m365b701561.onmicrosoft.com" `
+        -CertificatePath "$env:USERPROFILE\Documents\PnPPowerShellAppCert.pfx" `
+        -CertificatePassword (ConvertTo-SecureString -String "MyStrongPassword123!" -AsPlainText -Force)
+
+    # This is to see which site is being processed
+    Write-Host "Connected to site: $siteUrl"
+
+    # Apply the site template
+    Invoke-PnPSiteTemplate -Path "C:\Users\sut\Documents\CleanTemplate.xml"
+
+    Write-Host "Applied template to: $siteUrl"
+}
+
+    # Set Home.aspx as the landing page
+    Set-PnPHomePage -RootFolderRelativeUrl "SitePages/Home.aspx"
+
+    # Add Home to the Quick Launch navigation
+    Add-PnPNavigationNode -Title "Home" `
+        -Url "/sites/$($site.Alias)/SitePages/Home.aspx" `
+        -Location QuickLaunch `
+        -First
+
+
+####WORKED ON THE CREATED SITE (REMOVE UNWANTED AND DUPLICATE FEATURES
+
+###Remove unwanted features "Notebook", "Conversations", "Pages", "Site contents"
+# List of site aliases
+$siteAliases = @(
+    "cbmetcom-deal-folders",
+    "cb-capital-corp",
+    "roxre-shared-everyone",
+    "roxre-back-office",
+    "cb-legal",
+    "cb-acquisitions",
+    "cb-alt-fund",
+    "cb-leasing",
+    "cb-board-meetings",
+    "cb-human-resources",
+    "cb-securities",
+    "cb-mortgage-assets-us",
+    "cb-sandbox",
+    "cb-compliance",
+    "cb-kc-and-wes-only",
+    "starbucks",
+    "cb-metcom",
+    "cb-research",
+    "cb-legal-shared",
+    "roxborough-communities",
+    "special-events",
+    "cb-kc-wes-gaetano-only",
+    "cb-templates",
+    "cb-ai-ml",
+    "cb-tatumtek",
+    "cb-capital-raise",
+    "raynmakr",
+    "cb-kc-and-magda-only",
+    "roxre-projects-to-share",
+    "roxcom-leasing",
+    "roxre-management",
+    "cb-south-capital",
+    "starbucks-operations",
+    "cb-venture-capital",
+    "cbmetcom-admin",
+    "cb-us-equity-assets",
+    "cb---corporate",
+    "cb-ksa",
+    "cb-office-management",
+    "cb-executive-suite",
+    "kc-file-share",
+    "pre-con-commission-tracker",
+    "cbmetcom-texas-deals"
+)
+
+# Titles to remove from Quick Launch (normalized to lowercase)
+$titlesToRemove = @("Notebook", "Conversations", "Pages", "Site contents")
+
+foreach ($alias in $siteAliases) {
+    $siteUrl = "https://m365b701561.sharepoint.com/sites/$alias"
+    Write-Host "`nConnecting to $siteUrl..."
+
+    # Connect to the site
+    Connect-PnPOnline -Url $siteUrl `
+        -ClientId "f626ab55-a937-4e11-b780-891998651f30" `
+        -Tenant "m365b701561.onmicrosoft.com" `
+        -CertificatePath "$env:USERPROFILE\Documents\PnPPowerShellAppCert.pfx" `
+        -CertificatePassword (ConvertTo-SecureString -String "MyStrongPassword123!" -AsPlainText -Force)
+
+    # Get all Quick Launch nodes
+    $quickLaunchNodes = Get-PnPNavigationNode -Location QuickLaunch
+
+    foreach ($node in $quickLaunchNodes) {
+        $normalizedTitle = $node.Title.Trim().ToLower()
+        Write-Host "Found Quick Launch item: '$($node.Title)'"
+
+        if ($titlesToRemove -contains $normalizedTitle) {
+            Write-Host "Removing '$($node.Title)' from $alias"
+            Remove-PnPNavigationNode -Identity $node -Force
+        }
+    }
+
+    Write-Host "Finished cleaning navigation for $alias"
+}
+
+
+
+####Remove the Duplicate in the sites ("Home", "Documents")
+
+# List of site aliases
+$siteAliases = @(
+    "cbmetcom-deal-folders",
+    "cb-capital-corp",
+    "roxre-shared-everyone",
+    "roxre-back-office",
+    "cb-legal",
+    "cb-acquisitions",
+    "cb-alt-fund",
+    "cb-leasing",
+    "cb-board-meetings",
+    "cb-human-resources",
+    "cb-securities",
+    "cb-mortgage-assets-us",
+    "cb-sandbox",
+    "cb-compliance",
+    "cb-kc-and-wes-only",
+    "starbucks",
+    "cb-metcom",
+    "cb-research",
+    "cb-legal-shared",
+    "roxborough-communities",
+    "special-events",
+    "cb-kc-wes-gaetano-only",
+    "cb-templates",
+    "cb-ai-ml",
+    "cb-tatumtek",
+    "cb-capital-raise",
+    "raynmakr",
+    "cb-kc-and-magda-only",
+    "roxre-projects-to-share",
+    "roxcom-leasing",
+    "roxre-management",
+    "cb-south-capital",
+    "starbucks-operations",
+    "cb-venture-capital",
+    "cbmetcom-admin",
+    "cb-us-equity-assets",
+    "cb---corporate",
+    "cb-ksa",
+    "cb-office-management",
+    "cb-executive-suite",
+    "kc-file-share",
+    "pre-con-commission-tracker",
+    "cbmetcom-texas-deals"
+)
+
+# Titles to deduplicate (keep only one of each)
+$dedupeTitles = @("Home", "Documents")
+
+foreach ($alias in $siteAliases) {
+    $siteUrl = "https://m365b701561.sharepoint.com/sites/$alias"
+    Write-Host "`nConnecting to $siteUrl..."
+
+    # Connect to the site
+    Connect-PnPOnline -Url $siteUrl `
+        -ClientId "f626ab55-a937-4e11-b780-891998651f30" `
+        -Tenant "m365b701561.onmicrosoft.com" `
+        -CertificatePath "$env:USERPROFILE\Documents\PnPPowerShellAppCert.pfx" `
+        -CertificatePassword (ConvertTo-SecureString -String "MyStrongPassword123!" -AsPlainText -Force)
+
+    # Get all Quick Launch nodes
+    $quickLaunchNodes = Get-PnPNavigationNode -Location QuickLaunch
+
+    # Track counts of each title (case-insensitive)
+    $titleCounts = @{}
+
+    foreach ($node in $quickLaunchNodes) {
+        $normalizedTitle = $node.Title.Trim()
+
+        if ($dedupeTitles -contains $normalizedTitle) {
+            if ($titleCounts.ContainsKey($normalizedTitle)) {
+                $titleCounts[$normalizedTitle] += 1
+                Write-Host "Removing duplicate '$($node.Title)' from $alias"
+                Remove-PnPNavigationNode -Identity $node -Force
+            } else {
+                $titleCounts[$normalizedTitle] = 1
+                Write-Host "Keeping first '$($node.Title)' in $alias"
+            }
+        }
+    }
+
+    Write-Host "Finished deduplicating navigation for $alias"
+}
+
+
+
+
+
+
+
+###########Notes
+
+####Output/Result
+Reference site: https://m365b701561.sharepoint.com/sites/projectdocs
+Sites created:
+https://m365b701561.sharepoint.com/sites/ProjectSite001i
+https://m365b701561.sharepoint.com/sites/ProjectSite001iii
+https://m365b701561.sharepoint.com/sites/ProjectSite002ii
+https://m365b701561.sharepoint.com/sites/ProjectSite002iv
+https://m365b701561.sharepoint.com/sites/ProjectSite001v
+
+
+#To revert your SharePoint sites to the state they were in right after creation ( ie with the default features)
+Invoke-PnPSiteTemplate -Path "C:\\Users\\sut\\Documents\\CleanTemplate.xml"
+
+
+# Script to Check for Existing Sites Before Creating (Alternative to line 23-47)
+
+foreach ($site in $sites) {
+    $siteUrl = "https://m365b701561.sharepoint.com/sites/$($site.Alias)"
+    Write-Host "🔍 Checking site: $siteUrl"
+
+    if (Get-PnPTenantSite | Where-Object { $_.Url -eq $siteUrl }) {
+        Write-Host "⚠️ Site already exists: $siteUrl"
+        continue
+    }
+
+    try {
+        Write-Host "🚀 Creating site: $($site.Title) with alias: $($site.Alias)"
+        New-PnPSite -Type TeamSite -Title $site.Title -Alias $site.Alias -ErrorAction Stop -Verbose
+
+        Start-Sleep -Seconds 30
+
+        Connect-PnPOnline -Url $siteUrl `
+            -ClientId "f626ab55-a937-4e11-b780-891998651f30" `
+            -Tenant "m365b701561.onmicrosoft.com" `
+            -CertificatePath "$env:USERPROFILE\Documents\PnPPowerShellAppCert.pfx" `
+            -CertificatePassword (ConvertTo-SecureString -String "MyStrongPassword123!" -AsPlainText -Force) -Verbose
+
+        # Optional: Apply template
+        # Invoke-PnPSiteTemplate -Path "$env:USERPROFILE\Documents\CleanTemplate.xml"
+
+    } catch {
+        Write-Host "❌ Failed to create or connect to site: $siteUrl"
+        Write-Host "Error: $_"
+    }
+}
+
+
+
+##To Delete a SharePoint Site
+
+#Install MS Graph latest unified SDK
+Install-Module Microsoft.Graph -Scope CurrentUser -Force -AllowClobber
+
+#Updated Script to Find and Delete All Microsoft 365 Groups by Alias
+# Connect to Microsoft Graph
+Connect-MgGraph -Scopes "Group.ReadWrite.All"
+
+# Load site aliases from CSV
+$sites = Import-Csv "C:\Users\sut\Downloads\sharepoint_site_folders.csv"
+
+foreach ($site in $sites) {
+    $alias = $site.Alias
+
+    try {
+        # Get the group by MailNickname (alias)
+        $group = Get-MgGroup -Filter "mailNickname eq '$alias'" -ConsistencyLevel eventual
+
+        if ($group) {
+            Write-Host "Deleting group for site: $alias"
+            Remove-MgGroup -GroupId $group.Id -Confirm:$false
+            Write-Host "Deleted Microsoft 365 group and site: $alias"
+        } else {
+            Write-Host "No group found for alias: $alias"
+        }
+    }
+    catch {
+        Write-Host "Error deleting group for ${alias}: $($_.Exception.Message)"
+    }
+}
+
+#NOTE: When you delete a Microsoft 365 Group, it automatically deletes the associated SharePoint site as well.
+#That’s why you're now getting a 404 “File Not Found” error when trying to access the site — it’s already been deleted as part of the group deletion process.
+#The SharePoint site is moved to the Deleted Sites list (soft-deleted state, up to 93 days retention). It’s removed from the SharePoint admin center UI, but not fully gone from SharePoint
+
+### We will be using the Microsoft Online SharePoint PowerShell module (which includes Connect-SPOService, Get-SPODeletedSite, etc.).
+# which is only compatible with Windows PowerShell 5.1, not PowerShell 7+ (Core)
+
+##So in the Powershell ISE env: run the below to delete the sites permanently
+
+###Check for deleted SharePoint site
+Connect-SPOService -Url https://m365b701561-admin.sharepoint.com
+Get-SPODeletedSite
+
+####script that will permanently delete soft-deleted SharePoint sites
+Remove-SPODeletedSite -Identity "https://m365b701561.sharepoint.com/sites/pre-con-commission-tracker"
+
+
+####script that will permanently delete the list of all the soft-deleted SharePoint sites
+
+# Connect to SharePoint Online Admin
+Connect-SPOService -Url "https://m365b701561-admin.sharepoint.com"
+
+# List of deleted sites to permanently remove
+$sitesToDelete = @(
+    "https://m365b701561.sharepoint.com/sites/pre-con-commission-tracker",
+    "https://m365b701561.sharepoint.com/sites/starbucks-operations",
+    "https://m365b701561.sharepoint.com/sites/sitetwo",
+    "https://m365b701561.sharepoint.com/sites/cb-kc-and-magda-only",
+    "https://m365b701561.sharepoint.com/sites/cb-kc-and-wes-only",
+    "https://m365b701561.sharepoint.com/sites/cb-metcom",
+    "https://m365b701561.sharepoint.com/sites/ProjectSite12",
+    "https://m365b701561.sharepoint.com/sites/cb-compliance",
+    "https://m365b701561.sharepoint.com/sites/cb-legal",
+    "https://m365b701561.sharepoint.com/sites/cb-human-resources",
+    "https://m365b701561.sharepoint.com/sites/cb-legal-shared",
+    "https://m365b701561.sharepoint.com/sites/ProjectSite16",
+    "https://m365b701561.sharepoint.com/sites/cb-capital-raise",
+    "https://m365b701561.sharepoint.com/sites/ProjectSite03",
+    "https://m365b701561.sharepoint.com/sites/sitethree",
+    "https://m365b701561.sharepoint.com/sites/cbmetcom-deal-folders",
+    "https://m365b701561.sharepoint.com/sites/cb-research",
+    "https://m365b701561.sharepoint.com/sites/sitefive",
+    "https://m365b701561.sharepoint.com/sites/ProjectSite18",
+    "https://m365b701561.sharepoint.com/sites/cb-ksa",
+    "https://m365b701561.sharepoint.com/sites/roxre-projects-to-share",
+    "https://m365b701561.sharepoint.com/sites/roxcom-leasing",
+    "https://m365b701561.sharepoint.com/sites/roxborough-communities",
+    "https://m365b701561.sharepoint.com/sites/ProjectSite06",
+    "https://m365b701561.sharepoint.com/sites/kc-file-share",
+    "https://m365b701561.sharepoint.com/sites/starbucks",
+    "https://m365b701561.sharepoint.com/sites/cb-acquisitions",
+    "https://m365b701561.sharepoint.com/sites/cb-alt-fund",
+    "https://m365b701561.sharepoint.com/sites/sitefour",
+    "https://m365b701561.sharepoint.com/sites/roxre-back-office",
+    "https://m365b701561.sharepoint.com/sites/cb-south-capital",
+    "https://m365b701561.sharepoint.com/sites/raynmakr",
+    "https://m365b701561.sharepoint.com/sites/cb-mortgage-assets-us",
+    "https://m365b701561.sharepoint.com/sites/cb---corporate",
+    "https://m365b701561.sharepoint.com/sites/roxre-management",
+    "https://m365b701561.sharepoint.com/sites/ProjectSite20",
+    "https://m365b701561.sharepoint.com/sites/special-events",
+    "https://m365b701561.sharepoint.com/sites/cb-executive-suite",
+    "https://m365b701561.sharepoint.com/sites/roxre-shared-everyone",
+    "https://m365b701561.sharepoint.com/sites/cb-venture-capital",
+    "https://m365b701561.sharepoint.com/sites/cb-leasing",
+    "https://m365b701561.sharepoint.com/sites/cbmetcom-texas-deals",
+    "https://m365b701561.sharepoint.com/sites/cb-securities",
+    "https://m365b701561.sharepoint.com/sites/cb-office-management",
+    "https://m365b701561.sharepoint.com/sites/cb-templates",
+    "https://m365b701561.sharepoint.com/sites/cb-ai-ml",
+    "https://m365b701561.sharepoint.com/sites/cbmetcom-admin",
+    "https://m365b701561.sharepoint.com/sites/ProjectSite14",
+    "https://m365b701561.sharepoint.com/sites/cb-capital-corp",
+    "https://m365b701561.sharepoint.com/sites/cb-tatumtek",
+    "https://m365b701561.sharepoint.com/sites/ProjectSite01",
+    "https://m365b701561.sharepoint.com/sites/cb-sandbox",
+    "https://m365b701561.sharepoint.com/sites/siteone",
+    "https://m365b701561.sharepoint.com/sites/cb-board-meetings",
+    "https://m365b701561.sharepoint.com/sites/cb-kc-wes-gaetano-only",
+    "https://m365b701561.sharepoint.com/sites/ProjectSite11",
+    "https://m365b701561.sharepoint.com/sites/cb-us-equity-assets"
+)
+
+# Loop through and delete each
+foreach ($site in $sitesToDelete) {
+    Write-Host "Deleting: $site"
+    Remove-SPODeletedSite -Identity $site -Confirm:$false
+}
+
+#Verify Permanently Deleted Sites (If your site URL does NOT appear in this list anymore, it means it's permanently deleted)
+#After running Remove-SPODeletedSite, the site is removed from the SharePoint Recycle Bin (soft-delete storage).
+Get-SPODeletedSite
+
