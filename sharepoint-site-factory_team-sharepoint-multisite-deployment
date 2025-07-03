@@ -407,3 +407,140 @@ foreach ($site in $sitesToDelete) {
 #After running Remove-SPODeletedSite, the site is removed from the SharePoint Recycle Bin (soft-delete storage).
 Get-SPODeletedSite
 
+
+
+
+
+
+
+
+
+
+
+
+#######=============================>>>>>
+# NOTES #########
+
+##################################
+###Add title 
+# List of site aliases
+$siteAliases = @(
+    "ProjectSite001i",
+    "ProjectSite002ii",
+    "ProjectSite001iii",
+    "ProjectSite002iv",
+    "ProjectSite001v"
+
+)
+
+foreach ($alias in $siteAliases) {
+    $siteUrl = "https://m365b701561.sharepoint.com/sites/$alias"
+    Write-Host "Connecting to $siteUrl..."
+
+    # Connect to the site
+    Connect-PnPOnline -Url $siteUrl `
+        -ClientId "f626ab55-a937-4e11-b780-891998651f30" `
+        -Tenant "m365b701561.onmicrosoft.com" `
+        -CertificatePath "$env:USERPROFILE\Documents\PnPPowerShellAppCert.pfx" `
+        -CertificatePassword (ConvertTo-SecureString -String "MyStrongPassword123!" -AsPlainText -Force)
+
+    # Set Home.aspx as the default landing page
+    Set-PnPHomePage -RootFolderRelativeUrl "SitePages/Home.aspx"
+
+    # Add "Home" to Quick Launch
+    Add-PnPNavigationNode -Title "Home" `
+        -Url "/sites/$alias/SitePages/Home.aspx" `
+        -Location QuickLaunch `
+        -First
+
+    # Add "Documents" to Quick Launch
+    Add-PnPNavigationNode -Title "Documents" `
+        -Url "/sites/$alias/Shared%20Documents/Forms/AllItems.aspx" `
+        -Location QuickLaunch
+
+    # Add "Recycle Bin" to Quick Launch
+    Add-PnPNavigationNode -Title "Recycle Bin" `
+        -Url "/sites/$alias/_layouts/15/RecycleBin.aspx" `
+        -Location QuickLaunch
+
+    Write-Host "Navigation updated for $alias"
+}
+
+
+
+
+#########################
+###Update the created sites. Remove some unwanted Titles
+
+# List of site aliases (update these as needed)
+$siteAliases = @(
+    "ProjectSite001i",
+    "ProjectSite002ii",
+    "ProjectSite001iii",
+    "ProjectSite002iv",
+    "ProjectSite001v"
+)
+
+# Titles to remove from Quick Launch
+$titlesToRemove = @("Notebook", "Conversataions", "Project Files", "Recent")
+
+# Loop through each site
+foreach ($alias in $siteAliases) {
+    $siteUrl = "https://m365b701561.sharepoint.com/sites/$alias"
+    Write-Host "Connecting to $siteUrl..."
+
+    # Connect to the site
+    Connect-PnPOnline -Url $siteUrl `
+        -ClientId "f626ab55-a937-4e11-b780-891998651f30" `
+        -Tenant "m365b701561.onmicrosoft.com" `
+        -CertificatePath "$env:USERPROFILE\Documents\PnPPowerShellAppCert.pfx" `
+        -CertificatePassword (ConvertTo-SecureString -String "MyStrongPassword123!" -AsPlainText -Force)
+
+    # Get all Quick Launch nodes
+    $quickLaunchNodes = Get-PnPNavigationNode -Location QuickLaunch
+
+    # Remove unwanted titles
+    foreach ($node in $quickLaunchNodes) {
+        if ($titlesToRemove -contains $node.Title) {
+            Write-Host "Removing '$($node.Title)' from $alias"
+            Remove-PnPNavigationNode -Identity $node -Force
+        }
+    }
+
+    Write-Host "Finished cleaning navigation for $alias"
+}
+
+
+
+
+
+##############################
+###To remove a duplicate title
+
+##inspect the URLs of all "Pages" links before running the removal script
+$quickLaunchNodes | Where-Object { $_.Title -eq "Pages" } | Format-Table Title, Url
+
+foreach ($alias in $siteAliases) {
+    $siteUrl = "https://m365b701561.sharepoint.com/sites/$alias"
+    Write-Host "Connecting to $siteUrl..."
+
+    Connect-PnPOnline -Url $siteUrl `
+        -ClientId "f626ab55-a937-4e11-b780-891998651f30" `
+        -Tenant "m365b701561.onmicrosoft.com" `
+        -CertificatePath "$env:USERPROFILE\Documents\PnPPowerShellAppCert.pfx" `
+        -CertificatePassword (ConvertTo-SecureString -String "MyStrongPassword123!" -AsPlainText -Force)
+
+    $quickLaunchNodes = Get-PnPNavigationNode -Location QuickLaunch
+
+    foreach ($node in $quickLaunchNodes) {
+        if ($node.Url -eq "/sites/$alias/_layouts/15/RecycleBin.aspx") {
+            Write-Host "Removing Recycle Bin by URL from $alias"
+            Remove-PnPNavigationNode -Identity $node -Force
+        }
+    }
+
+    Write-Host "Finished cleaning navigation for $alias"
+}
+
+
+
