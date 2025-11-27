@@ -40,7 +40,20 @@ Export-Certificate -Cert $cert `
 #Next, create an App Reg in M365: Azure Active Directory → App registrations → Your app 
 #Upload the .cer cert: Certificates & secrets → Certificates → Upload certificate
 #Assign the API permissions to SharePoint / Graph & “Grant admin consent” so your app can use these permissions.
-# Connect using PnP PowerShell & with your certificate is registered, and you can authenticate without a password:
+## Microsoft Graph:
+# Directory.Read.All — Delegated
+# Directory.ReadWrite.All — Delegated
+# Directory.ReadWrite.All — Application
+# Group.ReadWrite.All — Delegated
+# Group.ReadWrite.All — Application
+# Sites.FullControl.All — Application
+# Sites.ReadWrite.All — Application
+# User.Read — Delegated
+## SharePoint:
+# AllSites.Write — Delegated
+# Sites.FullControl.All — Application
+
+# Connect using PnP PowerShell & with your certificate is registered, and you can authenticate without a password.
 
 
 #IV: Connect to the SharePoint site
