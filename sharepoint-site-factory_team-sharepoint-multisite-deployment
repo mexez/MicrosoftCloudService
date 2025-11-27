@@ -34,25 +34,58 @@ Export-PfxCertificate -Cert $cert `
 Export-Certificate -Cert $cert `
     -FilePath "$env:USERPROFILE\Documents\PnPPowerShellAppCert.cer"
 
+##goto RUN> certmgr.msc   (to see the cert: Certificates – Current User → Personal → Certificates) based on the name given "-Subject "CN=PnPAppCert""
 
-#III: Connect to the source site and export a clean template (excluding Lists and Pages)
+##
+#Next, create an App Reg in M365: Azure Active Directory → App registrations → Your app 
+#Upload the .cer cert: Certificates & secrets → Certificates → Upload certificate
+#Assign the API permissions to SharePoint / Graph & “Grant admin consent” so your app can use these permissions.
+# Connect using PnP PowerShell & with your certificate is registered, and you can authenticate without a password:
+
+
+#IV: Connect to the SharePoint site
+#using either of the two options:
+
+# i (Prompting for PFX password)
+$tenantId = "xxx"
+$clientId = "xxx"
+$siteUrl = "https://springlaw.sharepoint.com/sites/TestTeamSite"
+$certPath = "C:\Users\GradyArchie\Documents\SelfSignedCert\SpringLawPnPAppCert.pfx"
+
+# Prompt for the PFX password
+$certPassword = Read-Host -Prompt "Enter PFX password" -AsSecureString
+
+## Connect to SharePoint
+Connect-PnPOnline -Url $siteUrl `
+    -ClientId $clientId `
+    -Tenant $tenantId `
+    -CertificatePath $certPath `
+    -CertificatePassword $certPassword
+
+Get-PnPWeb | Select Title, Url
+
+OR
+
+#ii (for Hardcoded password & multiple connections
+
 Connect-PnPOnline -Url "https://m365b701561.sharepoint.com/sites/ProjectSite001i" `
-     -ClientId "f626ab55-a937-4e11-b780-891998651f30" `
+     -ClientId "xxx" `
      -Tenant "m365b701561.onmicrosoft.com" `
      -CertificatePath "$env:USERPROFILE\Documents\PnPPowerShellAppCert.pfx" `
      -CertificatePassword (ConvertTo-SecureString -String "MyStrongPassword123!" -AsPlainText -Force)
 
-Get-PnPSiteTemplate -Out "$env:USERPROFILE\Documents\CleanTemplate.xml" -ExcludeHandlers Lists, Pages
+Get-PnPSiteTemplate -Out "$env:USERPROFILE\Documents\CleanTemplate.xml" -ExcludeHandlers Lists, Pages  
+#this export a clean template (excluding Lists and Pages)
 
-
-#IV: Connect to the SharePoint admin center
 Connect-PnPOnline -Url "https://m365b701561-admin.sharepoint.com" `
-    -ClientId "f626ab55-a937-4e11-b780-891998651f30" `
+    -ClientId "xxx" `
     -Tenant "m365b701561.onmicrosoft.com" `
     -CertificatePath "$env:USERPROFILE\Documents\PnPPowerShellAppCert.pfx" `
     -CertificatePassword (ConvertTo-SecureString -String "MyStrongPassword123!" -AsPlainText -Force)
 
-# – Test the connection
+
+
+#Next Step  – Test the connection
 Get-PnPConnection
 Get-PnPSite
 Get-PnPList
