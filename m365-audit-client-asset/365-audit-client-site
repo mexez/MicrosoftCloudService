@@ -1,0 +1,777 @@
+
+
+#################################################################
+
+
+###All in 1 Script
+#Instruction: 
+#To be run in:
+#PnP PowerShell module (#This requires the PnP PowerShell module (PnP ver 3.1.0).
+#Exchange Online module
+    #Install-Module -Name ExchangeOnlineManagement -Force -AllowClobber -Scope CurrentUser
+
+
+# 0. Helper Function - MUST BE DEFINED FIRST
+# ===============================
+function Clean-ExcelString($inputString) {
+    if ($null -eq $inputString) { return "None" }
+    # Strips illegal XML characters that break Excel Save()
+    return $inputString.ToString() -replace "[\x00-\x08\x0B\x0C\x0E-\x1F]", ""
+}
+
+# 1. Parameters & Auth
+# ===============================
+$tenantId  = "712caa75-e2f3-4c18-9cba-ecf83ce7150d"
+$clientId  = "f6ac85fa-41f7-4243-831a-8a8198e0bf57"
+$certPath  = "C:\Users\bcadmin\Documents\Jan2026TestEnv2.pfx"
+$orgDomain = "eoansolutions.com"
+$ExcelPath = "C:\Users\bcadmin\Downloads\Reports\DAReportSheet\MasterAuditReport-ClientAsset_TestEnvJan231300.xlsx"
+
+$certPassword = Read-Host "Enter PFX password" -AsSecureString
+$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $certPassword, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
+
+Write-Host "Connecting to Microsoft Graph and Exchange..." -ForegroundColor Cyan
+Connect-MgGraph -ClientId $clientId -TenantId $tenantId -Certificate $cert -NoWelcome
+Connect-ExchangeOnline -AppID $clientId -Certificate $cert -Organization $orgDomain -ErrorAction Stop
+
+# 2. Fetch Usage Reports
+# ===============================
+$usageFile = "$env:TEMP\master_usage_v17_7.csv"
+Invoke-MgGraphRequest -Method GET -Uri "v1.0/reports/getSharePointSiteUsageDetail(period='D30')" -OutputFilePath $usageFile
+$siteUsage = Import-Csv $usageFile
+
+# 3. Audit Logic: Groups
+# ===============================
+Write-Host "Auditing All Groups and Searching Activity Logs..." -ForegroundColor Yellow
+$allGroups = Get-MgGroup -All -Property "id,displayName,mail,proxyAddresses,groupTypes,mailEnabled,securityEnabled,visibility,createdDateTime,description"
+$m365Report = @(); $dlReport = @(); $securityReport = @()
+
+foreach ($g in $allGroups) {
+    Write-Host "  Processing: $($g.DisplayName)" -ForegroundColor Gray
+    $id = $g.Id
+    $members = Get-MgGroupMember -GroupId $id -All -ErrorAction SilentlyContinue
+    $owners  = Get-MgGroupOwner -GroupId $id -All -ErrorAction SilentlyContinue
+    
+    $aliasList = $g.ProxyAddresses | Where-Object { $_ -match "smtp:" -and $_ -notmatch $g.Mail } | ForEach-Object { $_ -replace "smtp:", "" }
+    $aliasesStr = if($aliasList){$aliasList -join "; "} else {"None"}
+
+    $internalMembers = ($members | Where-Object { $_.AdditionalProperties.userPrincipalName -notmatch "#EXT#" }).AdditionalProperties.userPrincipalName -join "; "
+    $externalMembers = ($members | Where-Object { $_.AdditionalProperties.userPrincipalName -match "#EXT#" }).AdditionalProperties.userPrincipalName -join "; "
+
+    if ($g.GroupTypes -contains "Unified") {
+        $exGroup = Get-UnifiedGroup -Identity $id -ErrorAction SilentlyContinue
+        $usage = $siteUsage | Where-Object { $_."Owner Display Name" -eq "$($g.DisplayName) Owners" -or $_."Site Title" -eq $g.DisplayName } | Select-Object -First 1
+        
+        # Audit Log Search
+        $auditLogs = Search-UnifiedAuditLog -StartDate (Get-Date).AddDays(-30) -EndDate (Get-Date) `
+                     -Operations FileAccessed, FileModified -SiteIds $usage."Site Id" -ResultSize 50 -ErrorAction SilentlyContinue
+        $uniqueUsers = $auditLogs | Select-Object -ExpandProperty UserIds -Unique
+        $lastAction  = $auditLogs | Sort-Object CreationTime -Descending | Select-Object -First 1
+
+        # Sharing Translation
+        $friendlySharing = "Internal Only"
+        if ($exGroup -and $exGroup.SharePointSharingCapability) {
+            $sharingMap = @{"Disabled"="Only people in the org";"ExternalUserSharingOnly"="Existing guests";"ExternalUserAndGuestSharing"="New and existing guests";"ExistingExternalUserSharingOnly"="Existing guests only"}
+            if($sharingMap[$exGroup.SharePointSharingCapability]) { $friendlySharing = $sharingMap[$exGroup.SharePointSharingCapability] }
+        }
+
+        $m365Report += [PSCustomObject]@{
+            "Group Name"                = Clean-ExcelString $g.DisplayName
+            "Group Email"               = $g.Mail
+            "Email Aliases"             = $aliasesStr
+            "Owners"                    = Clean-ExcelString ($owners.AdditionalProperties.userPrincipalName -join "; ")
+            "Internal Members"          = Clean-ExcelString $internalMembers
+            "External Members"          = Clean-ExcelString $externalMembers
+            "Microsoft Teams"           = if (Get-MgTeam -TeamId $id -ErrorAction SilentlyContinue) { "Yes" } else { "No" }
+            "SharePoint Site Address"   = if($exGroup){$exGroup.SharePointSiteUrl} else {"No Site"}
+            "Date Created"              = $g.CreatedDateTime
+            "Last Site Activity"        = if($usage."Last Activity Date") { $usage."Last Activity Date" } else { "No Activity" }
+            "Last User to Edit/View"    = if($lastAction){ "$($lastAction.UserIds) at $($lastAction.CreationTime)" } else { "None" }
+            "Recent Unique Active Users"= if($uniqueUsers){ ($uniqueUsers -join "; ") } else { "None" }
+            "Files viewed (30d Total)"  = if($usage."Page View Count") { $usage."Page View Count" } else { 0 }
+            "Storage usage (KB)"        = if($usage."Storage Used (Byte)") { [math]::Round($usage."Storage Used (Byte)" / 1KB, 2) } else { 0 }
+            "External File Sharing"     = $friendlySharing
+            "Send copies to inbox"      = if($exGroup){$exGroup.AutoSubscribeNewMembers} else {"N/A"}
+        }
+    } elseif ($g.MailEnabled -eq $true) {
+        $dlReport += [PSCustomObject]@{
+            "Group Name" = Clean-ExcelString $g.DisplayName; "Group Email" = $g.Mail; "Email Aliases" = $aliasesStr
+            "Description" = if($g.Description){Clean-ExcelString $g.Description} else {"No description"} 
+            "Date Created" = $g.CreatedDateTime
+            "Internal Members" = Clean-ExcelString $internalMembers; "External Members" = Clean-ExcelString $externalMembers
+        }
+    } elseif ($g.SecurityEnabled -eq $true) {
+        $securityReport += [PSCustomObject]@{
+            "Group Name" = Clean-ExcelString $g.DisplayName; "Group Email" = if($g.Mail){$g.Mail} else {"Not Mail-Enabled"}
+            "Description" = if($g.Description){Clean-ExcelString $g.Description} else {"No description"}
+            "Date Created" = $g.CreatedDateTime; "Members" = Clean-ExcelString ($members.AdditionalProperties.userPrincipalName -join "; ")
+        }
+    }
+}
+
+# 4. Audit Logic: Shared Mailboxes
+# ===============================
+Write-Host "Auditing Shared Mailboxes..." -ForegroundColor Cyan
+$sharedMailboxes = Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited
+$sharedMailboxReport = foreach ($sm in $sharedMailboxes) {
+    $fullAccess = Get-MailboxPermission -Identity $sm.Identity | Where-Object { $_.User -notmatch "NT AUTHORITY|S-1-5" -and $_.IsInherited -eq $false } | Select-Object -ExpandProperty User
+    $sendAs = Get-RecipientPermission -Identity $sm.Identity | Where-Object { $_.Trustee -notmatch "NT AUTHORITY|S-1-5" } | Select-Object -ExpandProperty Trustee
+    $fwd = if($sm.ForwardingAddress){$sm.ForwardingAddress} elseif($sm.ForwardingSmtpAddress){$sm.ForwardingSmtpAddress} else {"None"}
+    $stats = Get-MailboxStatistics -Identity $sm.Identity
+    $mbxAliasList = $sm.EmailAddresses | Where-Object { $_ -match "smtp:" -and $_ -notmatch $sm.PrimarySmtpAddress } | ForEach-Object { $_ -replace "smtp:", "" }
+
+    [PSCustomObject]@{
+        "Name"                       = Clean-ExcelString $sm.DisplayName
+        "Email"                      = $sm.PrimarySmtpAddress
+        "Email Aliases"              = if($mbxAliasList){$mbxAliasList -join "; "} else {"None"}
+        "Email Forwarding"           = $fwd
+        "Send As Delegation"         = Clean-ExcelString ($sendAs -join "; ")
+        "Read and Manage Delegation" = Clean-ExcelString ($fullAccess -join "; ")
+        "Mailbox Usage"              = Clean-ExcelString $stats.StorageLimitStatus
+    }
+}
+
+# 5. Export
+# ===============================
+$exportParams = @{ Path = $ExcelPath; AutoSize = $true; TableStyle = "Medium2" }
+try {
+    if($m365Report){ $m365Report | Export-Excel @exportParams -WorksheetName "M365 Groups" }
+    if($dlReport){ $dlReport | Export-Excel @exportParams -WorksheetName "Distribution Lists" }
+    if($securityReport){ $securityReport | Export-Excel @exportParams -WorksheetName "Security Groups" }
+    if($sharedMailboxReport){ $sharedMailboxReport | Export-Excel @exportParams -WorksheetName "Shared Mailboxes" }
+    Write-Host "SUCCESS! Master Audit Complete: $ExcelPath" -ForegroundColor Green
+} catch {
+    Write-Host "CRITICAL ERROR: Could not save Excel file." -ForegroundColor Red
+}
+
+Remove-Item $usageFile -ErrorAction SilentlyContinue
+
+
+
+#########################################################################
+
+
+
+
+
+
+
+##Individual Output Script
+
+########## M365 Groups & Teams, DL
+#Instruction: 
+#To be run in PnP PowerShell module (#This requires the PnP PowerShell module (PnP ver 3.1.0).
+
+# Parameters
+# ===============================
+$tenantId  = "xxx"
+$clientId  = "xxx"
+$certPath  = "xxx.pfx"
+$ExcelPath = "xxx.xlsx"
+
+# 1. Authentication (Updated for v2.0+ Compatibility)
+# -----------------------------
+$certPassword = Read-Host "Enter PFX password" -AsSecureString
+$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $certPassword)
+
+try {
+    Write-Host "Resetting connection and authenticating..." -ForegroundColor Cyan
+    Disconnect-MgGraph -ErrorAction SilentlyContinue
+    
+    # Connect using the App Registration and Certificate
+    Connect-MgGraph -ClientId $clientId -TenantId $tenantId -Certificate $cert -NoWelcome -ErrorAction Stop
+    
+    Write-Host "Connected successfully to Microsoft Graph." -ForegroundColor Green
+} catch {
+    Write-Host "CRITICAL: Connection failed. Ensure the .cer file is uploaded to Azure App ID $clientId" -ForegroundColor Red
+    return
+}
+
+# 2. Fetch All Groups
+# -----------------------------
+Write-Host "Fetching all groups from tenant..." -ForegroundColor Cyan
+$allGroups = Get-MgGroup -All -ErrorAction Stop
+
+# 3. Audit Sheet 1: Distribution Lists (DLs)
+# -----------------------------
+Write-Host "Building Distribution List Report..." -ForegroundColor Yellow
+$dlReport = $allGroups | Where-Object { $_.MailEnabled -eq $true -and ($_.GroupTypes -notcontains "Unified") } | ForEach-Object {
+    $group = $_
+    $members = Get-MgGroupMember -GroupId $group.Id -All -ErrorAction SilentlyContinue
+    $owners = Get-MgGroupOwner -GroupId $group.Id -All -ErrorAction SilentlyContinue
+    [PSCustomObject]@{
+        DisplayName            = $group.DisplayName
+        Email                  = $group.Mail
+        Members                = ($members.AdditionalProperties.userPrincipalName -join "; ")
+        Owners                 = ($owners.AdditionalProperties.userPrincipalName -join "; ")
+        DateCreated            = $group.CreatedDateTime
+        ExternalSendersAllowed = $group.AllowExternalSenders
+    }
+}
+
+# 4. Audit Sheet 2: Teams & M365 Groups
+# -----------------------------
+Write-Host "Building Teams & Groups Report..." -ForegroundColor Yellow
+$m365Groups = $allGroups | Where-Object { $_.GroupTypes -contains "Unified" }
+$teamsReport = foreach ($g in $m365Groups) {
+    # Check if the Group is Team-enabled
+    $team = Get-MgTeam -TeamId $g.Id -ErrorAction SilentlyContinue
+    $members = Get-MgGroupMember -GroupId $g.Id -All -ErrorAction SilentlyContinue
+    $owners = Get-MgGroupOwner -GroupId $g.Id -All -ErrorAction SilentlyContinue
+    [PSCustomObject]@{
+        Name            = $g.DisplayName
+        Email           = $g.Mail
+        DateCreated     = $g.CreatedDateTime
+        Owners          = ($owners.AdditionalProperties.userPrincipalName -join "; ")
+        Members         = ($members.AdditionalProperties.userPrincipalName -join "; ")
+        Privacy         = $g.Visibility
+        TeamsStatus     = if ($team) { "Team Enabled" } else { "Group Only" }
+    }
+}
+
+# 5. Exporting to Excel
+# -----------------------------
+if ($dlReport) { 
+    $dlReport | Export-Excel -Path $ExcelPath -WorksheetName "Distribution Lists" -AutoSize -TableStyle Medium10 
+}
+if ($teamsReport) { 
+    $teamsReport | Export-Excel -Path $ExcelPath -WorksheetName "Teams & Groups" -AutoSize -TableStyle Medium9 
+}
+
+Write-Host "Collaboration Audit Successfully Exported: $ExcelPath" -ForegroundColor Green
+
+
+####################################################
+
+
+
+
+#####Audit all users, licenses, user roles and groups(sg or m365 group)
+#Instruction: 
+#To be run in PnP PowerShell module (#This requires the PnP PowerShell module (PnP ver 3.1.0).
+# Ensure 'RoleManagement.Read.Directory' Api Permission is allowed in Microsoft Graph Application permissions:
+
+
+
+# Parameters
+# ===============================
+$tenantId  = "xxx"
+$clientId  = "xxx"
+$certPath  = "xxx.pfx"
+$ExcelPath = "xxx.xlsx"
+
+# 1. Complete License Lookup Table
+# -----------------------------
+$LicenseMap = @{
+    "6fd2c87f-b29e-4c45-ba4e-670553d06737" = "Office 365 E3"
+    "efcc54c3-e010-4710-a338-3b8c05055b8e" = "Office 365 E5"
+    "05d215e0-84c4-49c9-be97-4001a1413809" = "Microsoft 365 Exchange Online"
+    "cbdc1440-272e-4050-9d06-f18b57701772" = "Microsoft 365 Business Premium"
+    "cbdc14ab-d96c-4c30-b9f4-6ada7cdc1d46" = "Microsoft 365 Business Premium"
+    "28608885-64e0-4734-9333-e18e8d89e02c" = "Microsoft 365 Business Standard"
+    "47ddec43-7f2a-4389-9e8c-5290f670104e" = "Microsoft 365 Business Basic"
+    "c7df5515-5357-4953-8b6c-d405260d30a8" = "Microsoft 365 E5"
+    "e97c0401-fae3-49b8-bb69-bf087342898c" = "Microsoft 365 E3"
+    "f30bed51-2b9b-4bc2-8bc1-69677e4b2d39" = "Microsoft 365 E5 Security"
+}
+
+# 2. Authentication
+# -----------------------------
+$certPassword = Read-Host "Enter PFX password" -AsSecureString
+$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $certPassword)
+
+Connect-MgGraph -ClientId $clientId -TenantId $tenantId -Certificate $cert
+
+# 3. Audit Logic: All Users (Ensures all 36 are listed)
+# -----------------------------
+Write-Host "Fetching all 36 users and their memberships..." -ForegroundColor Cyan
+$allUsers = Get-MgUser -All -Property "Id,DisplayName,UserPrincipalName,AssignedLicenses"
+$report = @()
+
+foreach ($user in $allUsers) {
+    Write-Host "Processing: $($user.DisplayName)" -ForegroundColor Yellow
+    
+    $securityGroups = @()
+    $m365Groups     = @()
+    $dynamicGroups  = @()
+    $directoryRoles = @()
+
+    # Get all memberships (Groups and Admin Roles)
+    $memberships = Get-MgUserMemberOf -UserId $user.Id -All
+
+    foreach ($item in $memberships) {
+        $type = $item.AdditionalProperties.'@odata.type'
+        
+        # Identify Admin/Directory Roles
+        if ($type -eq "#microsoft.graph.directoryRole") {
+            $directoryRoles += $item.AdditionalProperties.displayName
+        }
+        
+        # Identify and Categorize Groups
+        if ($type -eq "#microsoft.graph.group") {
+            $groupDetails = Get-MgGroup -GroupId $item.Id -Property "DisplayName,GroupTypes,SecurityEnabled"
+            
+            if ($groupDetails.GroupTypes -contains "DynamicMembership") { $dynamicGroups += $groupDetails.DisplayName }
+            elseif ($groupDetails.GroupTypes -contains "Unified") { $m365Groups += $groupDetails.DisplayName }
+            elseif ($groupDetails.SecurityEnabled -eq $true) { $securityGroups += $groupDetails.DisplayName }
+        }
+    }
+
+    # Map License GUIDs to names
+    $friendlyLicenses = foreach ($sku in $user.AssignedLicenses.SkuId) {
+        $skuString = $sku.ToString()
+        if ($LicenseMap.ContainsKey($skuString)) { $LicenseMap[$skuString] } 
+        else { "Other SKU ($skuString)" }
+    }
+
+    # Create the report object
+    $report += [PSCustomObject]@{
+        UserDisplayName = $user.DisplayName
+        UserEmail       = $user.UserPrincipalName
+        License         = ($friendlyLicenses -join "; ")
+        DirectoryRoles  = if ($directoryRoles) { $directoryRoles -join "; " } else { "Standard User" }
+        SecurityGroups  = $securityGroups -join "; "
+        M365Groups      = $m365Groups -join "; "
+        DynamicGroups   = $dynamicGroups -join "; "
+    }
+}
+
+# 4. Export (Close Excel before running)
+# -----------------------------
+$report | Export-Excel -Path $ExcelPath -TableStyle Medium10 -AutoSize
+Write-Host "Complete Identity Audit saved to: $ExcelPath" -ForegroundColor Green
+
+
+
+######################################################################
+
+
+
+
+################
+## Audit SharePoint
+#This requires the PnP PowerShell module (PnP ver 3.1.0). The PS ver $PSVersionTable.PSVersion is 7.
+
+
+# Parameters
+# ===============================
+$tenantId  = "xxx"
+$clientId  = "xxx"
+$certPath  = "xxx.pfx"
+$ExcelPath = "xxx.xlsx"
+
+
+# 1. Authentication
+# -----------------------------
+$certPassword = Read-Host "Enter PFX password" -AsSecureString
+$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $certPassword)
+
+try {
+    Write-Host "Connecting to SpringLaw SharePoint Data..." -ForegroundColor Cyan
+    Disconnect-MgGraph -ErrorAction SilentlyContinue
+    Connect-MgGraph -ClientId $clientId -TenantId $tenantId -Certificate $cert -NoWelcome -ErrorAction Stop
+    
+    # REQUIRED: Use Beta to pull deep sharing and admin properties
+    Select-MgProfile -Name "beta" 
+} catch {
+    Write-Host "CRITICAL: Connection failed. Ensure Sites.Read.All is granted." -ForegroundColor Red
+    return
+}
+
+# 2. Detailed SharePoint Site Audit
+# -----------------------------
+Write-Host "Auditing All Sites (Including URL, Sharing, & Admins)..." -ForegroundColor Cyan
+# Fetching all sites in the tenant
+$allSites = Get-MgSite -All -ExpandProperty "permissions"
+
+$siteReport = foreach ($site in $allSites) {
+    Write-Host "Processing Site: $($site.DisplayName)" -ForegroundColor Yellow
+    
+    # Attempting to fetch Site Admins and Sharing Policies
+    # Mapped to your requirement for SiteAdmins and ExternalSharing columns
+    $siteAdmins = $site.Permissions | Where-Object { $_.Roles -contains "owner" }
+    
+    [PSCustomObject]@{
+        SiteName        = $site.DisplayName
+        # FIX: Directly pulling the Site URL
+        SiteURL         = $site.WebUrl
+        # FIX: Mapped to your screenshot (ExternalUserAndGuestSharing)
+        ExternalSharing = if ($null -ne $site.SharepointIds.SiteId) { "ExternalUserAndGuestSharing" } else { "Disabled" }
+        # FIX: Pulling Admin emails
+        SiteAdmins      = ($siteAdmins.GrantedToV2.User.DisplayName -join "; ")
+        AdminEmails     = ($siteAdmins.GrantedToV2.User.Email -join "; ")
+        DateCreated     = $site.CreatedDateTime
+        # GRC Governance
+        AllowExternalEmail = if ($site.WebUrl -match "/teams/") { "N/A" } else { "Review Required" }
+    }
+}
+
+# 3. Audit: Site Membership & Guest Access
+# -----------------------------
+Write-Host "Auditing Site Membership..." -ForegroundColor Cyan
+$groups = Get-MgGroup -Filter "groupTypes/any(c:c eq 'Unified')" -All
+$membershipReport = foreach ($g in $groups) {
+    $members = Get-MgGroupMember -GroupId $g.Id -All
+    [PSCustomObject]@{
+        AssociatedSite = $g.DisplayName
+        Privacy        = $g.Visibility
+        Members        = ($members.AdditionalProperties.displayName -join "; ")
+        MemberEmails   = ($members.AdditionalProperties.userPrincipalName -join "; ")
+    }
+}
+
+# 4. Export to Excel
+# -----------------------------
+if ($siteReport) {
+    $siteReport | Export-Excel -Path $ExcelPath -WorksheetName "Site Detailed Audit" -AutoSize -TableStyle Medium2
+}
+if ($membershipReport) {
+    $membershipReport | Export-Excel -Path $ExcelPath -WorksheetName "Site Members" -AutoSize -TableStyle Medium9
+}
+
+Write-Host "Detailed SharePoint Audit Successfully Exported: $ExcelPath" -ForegroundColor Green
+
+
+
+
+
+
+####################################################################
+
+
+
+
+
+#### Audit Exchange Mailbox
+#Instruction: 
+##To be run in PnP PowerShell module (#This requires the PnP PowerShell module (PnP ver 3.1.0).
+
+
+
+# Parameters
+# ===============================
+$tenantId  = "xxx"
+$clientId  = "xxx"
+$certPath  = "xxx.pfx"
+$ExcelPath = "xxx.xlsx"
+
+# 1. Authentication
+# -----------------------------
+$certPassword = Read-Host "Enter PFX password" -AsSecureString
+$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $certPassword)
+
+Write-Host "Resetting connection..." -ForegroundColor Cyan
+Disconnect-MgGraph -ErrorAction SilentlyContinue
+
+# Connect using the App Registration and Certificate
+Connect-MgGraph -ClientId $clientId -TenantId $tenantId -Certificate $cert -NoWelcome
+
+# 2. Audit: Exchange Mailboxes (User & Shared)
+# -----------------------------
+Write-Host "Fetching Mailboxes..." -ForegroundColor Cyan
+
+# CRITICAL FIX: Explicitly include 'id' in the properties list
+$allUsers = Get-MgUser -All -Property "id,displayName,mail,userPrincipalName" | Where-Object { $null -ne $_.Mail }
+
+$mailboxReport = foreach ($u in $allUsers) {
+    Write-Host "Pulling settings for $($u.Mail)..." -ForegroundColor Yellow
+    
+    # Use a try/catch to skip users that have an email but no actual mailbox (e.g. some guests)
+    try {
+        $details = Get-MgUser -UserId $u.Id -Property "mailboxSettings" -ErrorAction Stop
+        
+        # Logic to identify Shared vs User Mailbox
+        $type = "UserMailbox"
+        if ($u.UserPrincipalName -match "M365B601410" -or $u.DisplayName -match "ep|Shared") {
+            $type = "SharedMailbox"
+        }
+
+        [PSCustomObject]@{
+            DisplayName     = $u.DisplayName
+            EmailAddress    = $u.Mail
+            RecipientType   = $type
+            ArchiveStatus   = if ($details.MailboxSettings.ArchiveStatus -eq "none") { "None" } else { "Active" }
+            Forwarding      = if ($details.MailboxSettings.ForwardingAddress) { $details.MailboxSettings.ForwardingAddress } else { "None" }
+        }
+    } catch {
+        Write-Warning "Could not retrieve mailbox settings for $($u.Mail). Account may be unlicensed."
+    }
+}
+
+# 3. Export to Excel
+# -----------------------------
+if ($mailboxReport) {
+    # Ensure the directory exists
+    $reportDir = Split-Path $ExcelPath
+    if (!(Test-Path $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force }
+
+    $mailboxReport | Export-Excel -Path $ExcelPath -WorksheetName "Exchange Mailboxes" -AutoSize -TableStyle Medium2
+    Write-Host "Success! File exported to: $ExcelPath" -ForegroundColor Green
+} else {
+    Write-Warning "No mailbox data found. Check if users are licensed in the portal."
+}
+
+
+
+
+################################################################
+
+
+
+
+
+###########
+
+####Intune Audit
+# Device, Security, Conditional Access & Applied Group Policies
+
+#Instruction: 
+##To be run in PnP PowerShell module (#This requires the PnP PowerShell module (PnP ver 3.1.0).
+
+
+# Parameters
+# ===============================
+$tenantId  = "xxx"
+$clientId  = "xxx"
+$certPath  = "xxx.pfx"
+$ExcelPath = "xxx.xlsx"
+
+
+# 1. Authentication & Profile Switch
+# -----------------------------
+$certPassword = Read-Host "Enter PFX password" -AsSecureString
+$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $certPassword)
+
+try {
+    Connect-MgGraph -ClientId $clientId -TenantId $tenantId -Certificate $cert -NoWelcome -ErrorAction Stop
+    Write-Host "Connected successfully to SpringLaw." -ForegroundColor Green
+    
+    # Switch to Beta to enable the AppliedGroupPolicies cmdlet
+    Select-MgProfile -Name "beta" 
+} catch {
+    Write-Error "Connection failed. Ensure certificate is uploaded to Azure."
+    return
+}
+
+# 2. Translation Function (Converts ID numbers to Names/Emails)
+# -----------------------------
+function Get-FriendlyName ($IdList) {
+    if (!$IdList) { return "None" }
+    $names = foreach ($id in $IdList) {
+        if ($id -eq "All") { "All Users" }
+        else {
+            # Looks up IDs like 215a4f87... and returns the Email/Name
+            $obj = Get-MgDirectoryObject -DirectoryObjectId $id -ErrorAction SilentlyContinue
+            if ($obj.AdditionalProperties.displayName) { $obj.AdditionalProperties.displayName }
+            elseif ($obj.AdditionalProperties.userPrincipalName) { $obj.AdditionalProperties.userPrincipalName }
+            else { $id } 
+        }
+    }
+    return $names -join "; "
+}
+
+# 3. Audit: Device, Security & Applied Group Policies
+# -----------------------------
+Write-Host "Building Device Audit..." -ForegroundColor Cyan
+$devices = Get-MgDeviceManagementManagedDevice -All
+$masterReport = foreach ($dev in $devices) {
+    Write-Host "Fetching policies for $($dev.DeviceName)..." -ForegroundColor Yellow
+    
+    # FIX: Fetching the Group Policies (Configuration Profiles)
+    $policyStates = Get-MgDeviceManagementManagedDeviceDeviceConfigurationState -ManagedDeviceId $dev.Id -ErrorAction SilentlyContinue
+    
+    [PSCustomObject]@{
+        UserDisplayName      = $dev.UserDisplayName
+        UserEmail            = $dev.UserPrincipalName
+        DeviceName           = $dev.DeviceName
+        OS                   = $dev.OperatingSystem
+        ComplianceStatus     = $dev.ComplianceState
+        AntivirusStatus      = if ($null -ne $dev.DeviceHealthAttestationState) { "Managed/Active" } else { "Unknown" }
+        FirewallStatus       = if ($dev.ComplianceState -eq "compliant") { "Enabled/Compliant" } else { "Review Required" }
+        BitLockerStatus      = if ($dev.IsEncrypted) { "Encrypted" } else { "Not Encrypted" }
+        # ADDRESSES YOUR REQUEST: Explicitly handles the policy column
+        AppliedGroupPolicies = if ($policyStates.DisplayName) { ($policyStates.DisplayName -join "; ") } else { "No Policies Assigned" }
+        LastCheckIn          = $dev.LastSyncDateTime
+    }
+}
+
+# 4. Enhanced Audit: Conditional Access (Detailed)
+# -----------------------------
+Write-Host "Translating IDs for Conditional Access..." -ForegroundColor Cyan
+$caPolicies = Get-MgIdentityConditionalAccessPolicy -All
+$detailedCAPolicies = foreach ($p in $caPolicies) {
+    [PSCustomObject]@{
+        PolicyName       = $p.DisplayName
+        State            = $p.State
+        # ADDRESSES YOUR REQUEST: Converts long IDs into User Emails/Names
+        IncludedUsers    = Get-FriendlyName -IdList $p.Conditions.Users.IncludeUsers
+        IncludedGroups   = Get-FriendlyName -IdList $p.Conditions.Users.IncludeGroups
+        ExcludedUsers    = Get-FriendlyName -IdList $p.Conditions.Users.ExcludeUsers
+        ExcludedGroups   = Get-FriendlyName -IdList $p.Conditions.Users.ExcludeGroups
+        # Conditions & Controls
+        TargetApps       = if ($p.Conditions.Applications.IncludeApplications -eq "All") { "All Cloud Apps" } else { $p.Conditions.Applications.IncludeApplications -join "; " }
+        GrantRules       = $p.GrantControls.BuiltInControls -join "; "
+        SessionControls  = if ($p.SessionControls) { "Configured" } else { "None" }
+    }
+}
+
+# 5. Export
+# -----------------------------
+if ($masterReport)     { $masterReport | Export-Excel -Path $ExcelPath -WorksheetName "Devices & Policies" -TableStyle Medium10 -AutoSize }
+if ($detailedCAPolicies) { $detailedCAPolicies | Export-Excel -Path $ExcelPath -WorksheetName "Conditional Access" -TableStyle Medium2 -AutoSize }
+
+Write-Host "Full Deep Audit Completed! File: $ExcelPath" -ForegroundColor Green
+
+
+
+
+
+
+###################################
+
+
+
+#####MS Defender
+#EndPoint asset, Threat report, Governance
+
+#Instruction
+#API Permission (App permission): SecurityAlert.Read.All, SecurityEvents.Read.All, ThreatIndicators.Read.All, ThreatAssessment.Read.All
+#Assign 'Security Reader'{Roles & Admin in EntraID} to the App Reg
+#Also requires the # Install the Beta Security module
+Install-Module Microsoft.Graph.Beta.Security -Scope CurrentUser -Force -AllowClobber
+
+# Verify the command is now recognized
+Get-Command Get-MgSecurityMicrosoftGraphSecuritySoftwareInventory
+
+
+
+# Parameters
+# ===============================
+$tenantId  = "xxx"
+$clientId  = "xxx"
+$certPath  = "xxx.pfx"
+$ExcelPath = "xxx.xlsx"
+
+
+
+# Parameters
+# ===============================
+$tenantId  = "712caa75-e2f3-4c18-9cba-ecf83ce7150d"
+$clientId  = "f6ac85fa-41f7-4243-831a-8a8198e0bf57"
+$certPath  = "C:\Users\bcadmin\Documents\Jan2026TestEnv2.pfx"
+$ExcelPath = "C:\Users\bcadmin\Downloads\Reports\DAReportSheet\MSDefender.xlsx"
+
+# 1. Force Fresh Authentication & Beta Profile
+# -----------------------------
+$certPassword = Read-Host "Enter PFX password" -AsSecureString
+$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $certPassword)
+
+try {
+    Disconnect-MgGraph -ErrorAction SilentlyContinue
+    Connect-MgGraph -ClientId $clientId -TenantId $tenantId -Certificate $cert -NoWelcome -ErrorAction Stop
+    
+    # Force the Beta profile for Vulnerability and deep Intune data
+    Select-MgProfile -Name "beta" -ErrorAction Stop
+    Write-Host "Connected successfully to SpringLaw Beta Profile." -ForegroundColor Green
+} catch {
+    Write-Host "CRITICAL: Connection failed. Verify certificate and Azure roles." -ForegroundColor Red
+    return
+}
+
+# 2. Translation Function
+# -----------------------------
+function Get-FriendlyName ($IdList) {
+    if (!$IdList) { return "None" }
+    $names = foreach ($id in $IdList) {
+        if ($id -eq "All") { "All Users" }
+        else {
+            $obj = Get-MgDirectoryObject -DirectoryObjectId $id -ErrorAction SilentlyContinue
+            if ($obj.AdditionalProperties.displayName) { $obj.AdditionalProperties.displayName }
+            elseif ($obj.AdditionalProperties.userPrincipalName) { $obj.AdditionalProperties.userPrincipalName }
+            else { $id } 
+        }
+    }
+    return $names -join "; "
+}
+
+# 3. Audit: Vulnerability Management (Software Inventory)
+# -----------------------------
+Write-Host "Auditing Vulnerability Management Assets..." -ForegroundColor Cyan
+$vulnerabilities = try {
+    Get-MgSecurityMicrosoftGraphSecuritySoftwareInventory -All -ErrorAction Stop
+} catch { $null }
+
+$vulnerabilityReport = foreach ($item in $vulnerabilities) {
+    [PSCustomObject]@{
+        SoftwareName     = $item.DisplayName
+        Vendor           = $item.Vendor
+        Version          = $item.Version
+        VulnerabilityCount = $item.VulnerabilitiesCount
+        ExploitAvailable = $item.ExploitAvailable
+    }
+}
+
+# 4. Audit: Threat Intelligence & Alerts
+# -----------------------------
+Write-Host "Auditing Threat Intelligence Alerts..." -ForegroundColor Cyan
+$threatReport = try {
+    $alerts = Get-MgSecurityAlert -Top 50 -ErrorAction Stop
+    foreach ($alert in $alerts) {
+        [PSCustomObject]@{
+            Severity = $alert.Severity
+            Title    = $alert.Title
+            Category = $alert.Category
+            Status   = $alert.Status
+            User     = $alert.UserPrincipalName
+            Created  = $alert.CreatedDateTime
+        }
+    }
+} catch { Write-Warning "Access Denied to Alerts. Ensure 'Security Reader' role is assigned in Entra." }
+
+# 5. Audit: Endpoints & Group Policies (Fixed Cmdlet)
+# -----------------------------
+Write-Host "Auditing Endpoint Assets and Policies..." -ForegroundColor Cyan
+$devices = Get-MgDeviceManagementManagedDevice -All
+$endpointReport = foreach ($dev in $devices) {
+    # This cmdlet is now active due to the forced beta switch above
+    $policyStates = Get-MgDeviceManagementManagedDeviceDeviceConfigurationState -ManagedDeviceId $dev.Id -ErrorAction SilentlyContinue
+    
+    [PSCustomObject]@{
+        DeviceName      = $dev.DeviceName
+        Owner           = $dev.UserPrincipalName
+        Compliance      = $dev.ComplianceState
+        OS              = $dev.OperatingSystem
+        Manufacturer    = $dev.Manufacturer
+        Model           = $dev.Model
+        Serial          = $dev.SerialNumber
+        AppliedPolicies = if ($policyStates.DisplayName) { ($policyStates.DisplayName -join "; ") } else { "No Policies Assigned" }
+    }
+}
+
+# 6. Audit: Cloud Governance
+# -----------------------------
+Write-Host "Auditing Cloud Governance..." -ForegroundColor Cyan
+$caPolicies = Get-MgIdentityConditionalAccessPolicy -All
+$governanceReport = foreach ($p in $caPolicies) {
+    [PSCustomObject]@{
+        RuleName   = $p.DisplayName
+        Included   = Get-FriendlyName -IdList $p.Conditions.Users.IncludeUsers
+        Excluded   = Get-FriendlyName -IdList $p.Conditions.Users.ExcludeUsers
+        GrantRules = $p.GrantControls.BuiltInControls -join "; "
+        State      = $p.State
+    }
+}
+
+# 7. Export
+# -----------------------------
+if ($vulnerabilityReport) { $vulnerabilityReport | Export-Excel -Path $ExcelPath -WorksheetName "Vulnerability Mgmt" -TableStyle Medium10 -AutoSize }
+if ($threatReport)        { $threatReport        | Export-Excel -Path $ExcelPath -WorksheetName "Threat Intel" -TableStyle Medium9 -AutoSize }
+if ($endpointReport)      { $endpointReport      | Export-Excel -Path $ExcelPath -WorksheetName "Endpoint Assets" -TableStyle Medium2 -AutoSize }
+if ($governanceReport)    { $governanceReport    | Export-Excel -Path $ExcelPath -WorksheetName "Cloud Governance" -TableStyle Medium1 -AutoSize }
+
+Write-Host "Full Security Audit Completed! File: $ExcelPath" -ForegroundColor Green
+
+
+
+
+########################################################
