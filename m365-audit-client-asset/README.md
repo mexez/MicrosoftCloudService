@@ -10,6 +10,12 @@ ii. Application permissions (not delegated) are required & Admin consent must be
 ##Required Microsoft Graph API Permissions
 ##The App Registration must include the following Application permissions, depending on which report  you run:
 
+API: Permission name:
+Micrsooft Graph
+Office 365 Exchange Online
+SharePoint
+
+
 | API / Permission Name                   | Permission Type | Description                                             | Admin Consent | Status  |
 | --------------------------------------- | --------------- | ------------------------------------------------------- | ------------- | ------- |
 | DeviceManagementApps.Read.All           | Application     | Read Microsoft Intune apps                              | Yes           | Granted |
