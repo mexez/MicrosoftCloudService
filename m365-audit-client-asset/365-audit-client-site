@@ -11,6 +11,20 @@
     #Install-Module -Name ExchangeOnlineManagement -Force -AllowClobber -Scope CurrentUser
 
 
+##End Active Session:
+# i. Force-close active sessions
+Write-Host "Force-closing all previous sessions..." -ForegroundColor Yellow
+Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+Disconnect-MgGraph -ErrorAction SilentlyContinue
+
+# ii. Clear local temp files to prevent reading old eoansolutions reports
+Write-Host "Clearing local report cache..." -ForegroundColor Yellow
+Remove-Item "$env:TEMP\master_usage_v17_7.csv" -ErrorAction SilentlyContinue
+
+Write-Host "READY: You can now run your Parklane script." -ForegroundColor Green
+
+
+
 # 0. Helper Function - MUST BE DEFINED FIRST
 # ===============================
 function Clean-ExcelString($inputString) {
