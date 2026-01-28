@@ -2,8 +2,155 @@
 
 #################################################################
 
+###All in 1 Script
+#This includes 'All Mailbox'
+#Instruction: 
+#To be run in:
+#PnP PowerShell module (#This requires the PnP PowerShell module (PnP ver 3.1.0).
+#Exchange Online module
+    #Install-Module -Name ExchangeOnlineManagement -Force -AllowClobber -Scope CurrentUser
+
+
+# 0. Helper Function - MUST BE DEFINED FIRST
+# ===============================
+function Clean-ExcelString($inputString) {
+    if ($null -eq $inputString) { return "None" }
+    return $inputString.ToString() -replace "[\x00-\x08\x0B\x0C\x0E-\x1F]", ""
+}
+
+# 1. CLEAN RESET
+Write-Host "Force-closing previous sessions..." -ForegroundColor Yellow
+Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+Disconnect-MgGraph -ErrorAction SilentlyContinue
+
+# 2. Parameters & Auth
+# ===============================
+$tenantId  = "0758b553-2d3f-40ec-bf92-f660c064ac83"
+$clientId  = "5ffac2a8-c1e1-41f2-994d-efbc9e9c33fb"
+$certPath  = "C:\Users\bcadmin\Documents\ParklaneClientAsset.pfx"
+$orgDomain = "parklanemechanical.com"
+$ExcelPath = "C:\Users\bcadmin\Downloads\Reports\DAReportSheet\Parklane_MasterAuditReport_Jan28.xlsx"
+
+$certPassword = Read-Host "Enter PFX password" -AsSecureString
+$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $certPassword, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
+
+Write-Host "Connecting to Graph and Exchange..." -ForegroundColor Cyan
+Connect-MgGraph -ClientId $clientId -TenantId $tenantId -Certificate $cert -NoWelcome
+Connect-ExchangeOnline -AppID $clientId -Certificate $cert -Organization $orgDomain -ErrorAction Stop
+
+# 3. Fetch Usage Reports
+# ===============================
+$usageFile = "$env:TEMP\master_usage_v18_1.csv"
+Invoke-MgGraphRequest -Method GET -Uri "v1.0/reports/getSharePointSiteUsageDetail(period='D30')" -OutputFilePath $usageFile
+$siteUsage = Import-Csv $usageFile
+
+# 4. Audit Logic: Groups (M365, DL, Security)
+# ===============================
+Write-Host "Auditing All Groups..." -ForegroundColor Yellow
+$allGroups = Get-MgGroup -All -Property "id,displayName,mail,proxyAddresses,groupTypes,mailEnabled,securityEnabled,visibility,createdDateTime,description"
+$m365Report = @(); $dlReport = @(); $securityReport = @()
+
+foreach ($g in $allGroups) {
+    $id = $g.Id
+    $members = Get-MgGroupMember -GroupId $id -All -ErrorAction SilentlyContinue
+    $owners  = Get-MgGroupOwner -GroupId $id -All -ErrorAction SilentlyContinue
+    
+    $aliasList = $g.ProxyAddresses | Where-Object { $_ -match "smtp:" -and $_ -notmatch $g.Mail } | ForEach-Object { $_ -replace "smtp:", "" }
+    $aliasesStr = if($aliasList){$aliasList -join "; "} else {"None"}
+
+    $internalMembers = ($members | Where-Object { $_.AdditionalProperties.userPrincipalName -notmatch "#EXT#" }).AdditionalProperties.userPrincipalName -join "; "
+    $externalMembers = ($members | Where-Object { $_.AdditionalProperties.userPrincipalName -match "#EXT#" }).AdditionalProperties.userPrincipalName -join "; "
+
+    if ($g.GroupTypes -contains "Unified") {
+        $exGroup = Get-UnifiedGroup -Identity $id -ErrorAction SilentlyContinue
+        $usage = $siteUsage | Where-Object { $_."Owner Display Name" -eq "$($g.DisplayName) Owners" -or $_."Site Title" -eq $g.DisplayName } | Select-Object -First 1
+        
+        $auditLogs = Search-UnifiedAuditLog -StartDate (Get-Date).AddDays(-30) -EndDate (Get-Date) `
+                     -Operations FileAccessed, FileModified -SiteIds $usage."Site Id" -ResultSize 50 -ErrorAction SilentlyContinue
+        $uniqueUsers = $auditLogs | Select-Object -ExpandProperty UserIds -Unique
+        $lastAction  = $auditLogs | Sort-Object CreationTime -Descending | Select-Object -First 1
+
+        $m365Report += [PSCustomObject]@{
+            "Group Name"                = Clean-ExcelString $g.DisplayName
+            "Group Email"               = $g.Mail
+            "Email Aliases"             = $aliasesStr
+            "Owners"                    = Clean-ExcelString ($owners.AdditionalProperties.userPrincipalName -join "; ")
+            "Internal Members"          = Clean-ExcelString $internalMembers
+            "External Members"          = Clean-ExcelString $externalMembers
+            "Microsoft Teams"           = if (Get-MgTeam -TeamId $id -ErrorAction SilentlyContinue) { "Yes" } else { "No" }
+            "SharePoint Site Address"   = if($exGroup){$exGroup.SharePointSiteUrl} else {"No Site"}
+            "Date Created"              = $g.CreatedDateTime
+            "Last Site Activity"        = if($usage."Last Activity Date") { $usage."Last Activity Date" } else { "No Activity" }
+            "Last User to Edit/View"    = if($lastAction){ "$($lastAction.UserIds) at $($lastAction.CreationTime)" } else { "None" }
+            "Recent Unique Active Users"= if($uniqueUsers){ ($uniqueUsers -join "; ") } else { "None" }
+            "Storage usage (KB)"        = if($usage."Storage Used (Byte)") { [math]::Round($usage."Storage Used (Byte)" / 1KB, 2) } else { 0 }
+            "Files viewed (30d)"        = if($usage."Page View Count") { $usage."Page View Count" } else { 0 }
+            "External File Sharing"     = if($exGroup){$exGroup.SharePointSharingCapability} else {"Internal Only"}
+        }
+    } elseif ($g.MailEnabled -eq $true) {
+        $dlReport += [PSCustomObject]@{
+            "Group Name" = Clean-ExcelString $g.DisplayName; "Group Email" = $g.Mail; "Email Aliases" = $aliasesStr
+            "Description" = if($g.Description){Clean-ExcelString $g.Description} else {"No description"} 
+            "Internal Members" = Clean-ExcelString $internalMembers; "External Members" = Clean-ExcelString $externalMembers
+        }
+    } elseif ($g.SecurityEnabled -eq $true) {
+        $securityReport += [PSCustomObject]@{
+            "Group Name" = Clean-ExcelString $g.DisplayName; "Group Email" = if($g.Mail){$g.Mail} else {"Not Mail-Enabled"}
+            "Members" = Clean-ExcelString ($members.AdditionalProperties.userPrincipalName -join "; ")
+        }
+    }
+}
+
+# 5. Audit Logic: ALL MAILBOXES (Reusable function for logic consistency)
+# ===============================
+Write-Host "Auditing All Mailboxes..." -ForegroundColor Cyan
+$allMbxData = Get-Mailbox -ResultSize Unlimited 
+$allMailboxReport = foreach ($sm in $allMbxData) {
+    $fullAccess = Get-MailboxPermission -Identity $sm.Identity | Where-Object { $_.User -notmatch "NT AUTHORITY|S-1-5" -and $_.IsInherited -eq $false } | Select-Object -ExpandProperty User
+    $sendAs = Get-RecipientPermission -Identity $sm.Identity | Where-Object { $_.Trustee -notmatch "NT AUTHORITY|S-1-5" } | Select-Object -ExpandProperty Trustee
+    $fwd = if($sm.ForwardingAddress){$sm.ForwardingAddress} elseif($sm.ForwardingSmtpAddress){$sm.ForwardingSmtpAddress} else {"None"}
+    $stats = Get-MailboxStatistics -Identity $sm.Identity
+    $mbxAliasList = $sm.EmailAddresses | Where-Object { $_ -match "smtp:" -and $_ -notmatch $sm.PrimarySmtpAddress } | ForEach-Object { $_ -replace "smtp:", "" }
+
+    [PSCustomObject]@{
+        "Name"                       = Clean-ExcelString $sm.DisplayName
+        "Email"                      = $sm.PrimarySmtpAddress
+        "Mailbox Type"               = $sm.RecipientTypeDetails
+        "Email Aliases"              = if($mbxAliasList){$mbxAliasList -join "; "} else {"None"}
+        "Email Forwarding"           = $fwd
+        "Send As Delegation"         = Clean-ExcelString ($sendAs -join "; ")
+        "Read and Manage Delegation" = Clean-ExcelString ($fullAccess -join "; ")
+        "Mailbox Usage"              = Clean-ExcelString $stats.StorageLimitStatus
+    }
+}
+
+# Split the list specifically for the Shared Mailbox sheet
+$sharedMailboxReport = $allMailboxReport | Where-Object { $_."Mailbox Type" -eq "SharedMailbox" }
+
+# 6. Export
+# ===============================
+$exportParams = @{ Path = $ExcelPath; AutoSize = $true; TableStyle = "Medium2" }
+try {
+    if($m365Report){ $m365Report | Export-Excel @exportParams -WorksheetName "M365 Groups" }
+    if($dlReport){ $dlReport | Export-Excel @exportParams -WorksheetName "Distribution Lists" }
+    if($securityReport){ $securityReport | Export-Excel @exportParams -WorksheetName "Security Groups" }
+    if($sharedMailboxReport){ $sharedMailboxReport | Export-Excel @exportParams -WorksheetName "Shared Mailboxes" }
+    if($allMailboxReport){ $allMailboxReport | Export-Excel @exportParams -WorksheetName "All Mailboxes" }
+    Write-Host "SUCCESS! Master Audit Complete: $ExcelPath" -ForegroundColor Green
+} catch {
+    Write-Host "CRITICAL ERROR: Could not save Excel file." -ForegroundColor Red
+}
+
+Remove-Item $usageFile -ErrorAction SilentlyContinue
+
+
+#  OR
+
+
+
 
 ###All in 1 Script
+#This dosent include all mailboxes , just shared mailbox
 #Instruction: 
 #To be run in:
 #PnP PowerShell module (#This requires the PnP PowerShell module (PnP ver 3.1.0).
