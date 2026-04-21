@@ -62,9 +62,9 @@ function Resolve-MemberName($member) {
 # =======================
 # AUTH CONFIG
 # =======================
-$tenantId  = "0758b553-2d3f-40ec-bf92-f660c064ac83"
-$clientId  = "5ffac2a8-c1e1-41f2-994d-efbc9e9c33fb"
-$certPath  = "C:\Users\bcadmin\Documents\ParklaneClientAsset.pfx"
+$tenantId  = "xxx"
+$clientId  = "xxx"
+$certPath  = "C:\Users\bcadmin\Documents\xxx.pfx"
 $ExcelPath = "C:\Users\bcadmin\Downloads\Reports\DAReportSheet\Parklane_SPSites_Membership_Apr212026.xlsx"
 $adminUrl  = "https://9058445020-admin.sharepoint.com"
 
