@@ -25,11 +25,11 @@ Disconnect-MgGraph -ErrorAction SilentlyContinue
 
 # 2. Parameters & Auth
 # ===============================
-$tenantId  = "0758b553-2d3f-40ec-bf92-f660c064ac83"
-$clientId  = "5ffac2a8-c1e1-41f2-994d-efbc9e9c33fb"
-$certPath  = "C:\Users\bcadmin\Documents\ParklaneClientAsset.pfx"
-$orgDomain = "parklanemechanical.com"
-$ExcelPath = "C:\Users\bcadmin\Downloads\Reports\DAReportSheet\Parklane_MasterAuditReport_Jan28.xlsx"
+$tenantId  = "xxx"
+$clientId  = "xxx"
+$certPath  = "C:\Users\xx\Documents\az.pfx"
+$orgDomain = "abc.com"
+$ExcelPath = "C:\Users\xx\Downloads\Reports\DAReportSheet\az_MasterAuditReport_Jan28.xlsx"
 
 $certPassword = Read-Host "Enter PFX password" -AsSecureString
 $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $certPassword, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
